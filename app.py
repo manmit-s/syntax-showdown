@@ -36,18 +36,6 @@ st.set_page_config(
 )
 
 
-# ---------------------------------------------------------------------------
-# One-time SDK setup
-# ---------------------------------------------------------------------------
-
-@st.cache_resource(show_spinner=False)
-def _bootstrap() -> None:
-    """
-    Initialise Firebase and Gemini exactly once per app process.
-    st.cache_resource persists across reruns and sessions.
-    """
-    db_client.initialize_firebase()
-    ai_engine.initialize_gemini()
 
 
 # ---------------------------------------------------------------------------
@@ -286,17 +274,28 @@ def _render_results_screen(match_id: str, match_data: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    # Always initialise session defaults first
+    # Session defaults must come first — everything below may read session state.
     state_manager.init_session_state()
 
-    # One-time Firebase + Gemini init (cached at process level)
+    # Initialise Firebase (guarded by firebase_admin._apps — runs once per process)
     try:
-        _bootstrap()
+        db_client.initialize_firebase()
     except Exception as exc:
-        st.error(f"⚠️ Startup failed: {exc}")
+        st.error(f"⚠️ Firebase init failed: {exc}")
         st.info(
-            "Make sure .streamlit/secrets.toml contains GEMINI_API_KEY "
-            "and the [firebase_credentials] block."
+            "Check the [firebase_credentials] block in .streamlit/secrets.toml. "
+            "Make sure the private_key is on one line with literal \\n characters."
+        )
+        st.stop()
+
+    # Initialise Gemini (guarded by module-level _client — runs once per process)
+    try:
+        ai_engine.initialize_gemini()
+    except Exception as exc:
+        st.error(f"⚠️ Gemini init failed: {exc}")
+        st.info(
+            "Check that GEMINI_API_KEY is set correctly in .streamlit/secrets.toml. "
+            "Get a key at https://aistudio.google.com/app/apikey"
         )
         st.stop()
 
