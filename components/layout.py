@@ -1,243 +1,192 @@
-﻿import streamlit as st
+"""
+components/layout.py — reusable Streamlit UI building blocks.
+
+All functions are pure renderers: they receive data as arguments and
+call st.* — they do NOT read from session_state or call any core modules.
+"""
+
+from __future__ import annotations
+
 import pandas as pd
+import streamlit as st
+
+from utils.config import MatchStatus
+
+
+# ---------------------------------------------------------------------------
+# Scoreboard header
+# ---------------------------------------------------------------------------
 
 def render_header(p1_score: int, p2_score: int, match_status: str) -> None:
-    """
-    Render the header section with player scores and match status.
-    
-    Args:
-        p1_score: Player 1 score
-        p2_score: Player 2 score
-        match_status: Current match status
-    """
-    # Create three columns for the header
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        # Calculate delta for Player 1
-        delta_p1 = p1_score - p2_score if p1_score > p2_score else None
-        st.metric(
-            label="🎮 Player 1",
-            value=p1_score,
-            delta=delta_p1
-        )
-    
-    with col2:
-        # Determine status color/icon
-        status_config = {
-            "waiting": {"emoji": "⏳", "color": "orange"},
-            "active": {"emoji": "⚔️", "color": "green"},
-            "finished": {"emoji": "🏆", "color": "purple"}
+    """Render the 3-column score dashboard."""
+    col_p1, col_status, col_p2 = st.columns(3)
+
+    with col_p1:
+        delta = (p1_score - p2_score) if p1_score != p2_score else None
+        st.metric("🎮 Player 1", p1_score, delta=delta)
+
+    with col_status:
+        _STATUS_EMOJI = {
+            MatchStatus.WAITING:  "⏳",
+            MatchStatus.ACTIVE:   "⚔️",
+            MatchStatus.FINISHED: "🏆",
         }
-        
-        config = status_config.get(match_status, {"emoji": "❓", "color": "gray"})
-        status_display = f"{config['emoji']} {match_status.title()}"
-        
-        st.metric(
-            label="Match Status",
-            value=status_display,
-            delta=None
-        )
-    
-    with col3:
-        # Calculate delta for Player 2
-        delta_p2 = p2_score - p1_score if p2_score > p1_score else None
-        st.metric(
-            label="🎮 Player 2",
-            value=p2_score,
-            delta=delta_p2
-        )
-    
-    # Add a separator
+        emoji  = _STATUS_EMOJI.get(match_status, "❓")
+        st.metric("Match Status", f"{emoji} {match_status.title()}")
+
+    with col_p2:
+        delta = (p2_score - p1_score) if p2_score != p1_score else None
+        st.metric("🎮 Player 2", p2_score, delta=delta)
+
     st.divider()
 
+
+# ---------------------------------------------------------------------------
+# Problem panel
+# ---------------------------------------------------------------------------
+
 def render_problem_panel(problem_data: dict) -> None:
-    """
-    Render the problem description panel.
-    
-    Args:
-        problem_data: Dictionary with problem information
-    """
-    st.markdown(f"# 🎯 {problem_data.get('title', 'Untitled Problem')}")
-    st.markdown("---")
-    
-    # Problem description
-    st.markdown("### Problem Description")
-    st.markdown(problem_data.get('description', 'No description provided.'))
-    
-    # Constraints and test cases in expander
-    with st.expander("📋 View Constraints & Examples", expanded=True):
-        # Constraints
-        constraints = problem_data.get('constraints', [])
+    """Render the problem statement, constraints and example test cases."""
+    st.markdown(f"## 🎯 {problem_data.get('title', 'Untitled Problem')}")
+    st.markdown(problem_data.get("description", "*No description provided.*"))
+
+    with st.expander("📋 Constraints & Examples", expanded=True):
+        constraints = problem_data.get("constraints", [])
         if constraints:
-            st.markdown("#### Constraints")
-            for constraint in constraints:
-                st.markdown(f"• {constraint}")
-        
-        # Test cases
-        test_cases = problem_data.get('test_cases', [])
+            st.markdown("**Constraints**")
+            for c in constraints:
+                st.markdown(f"- {c}")
+
+        test_cases = problem_data.get("test_cases", [])
         if test_cases:
-            st.markdown("#### Example Test Cases")
-            
-            # Create a table for test cases
-            test_case_data = []
-            for i, test_case in enumerate(test_cases[:3]):  # Show max 3 examples
-                input_val = test_case.get('input', 'N/A')
-                output_val = test_case.get('expected_output', 'N/A')
-                
-                test_case_data.append({
-                    "Case": f"#{i+1}",
-                    "Input": str(input_val),
-                    "Expected Output": str(output_val)
-                })
-            
-            if test_case_data:
-                df = pd.DataFrame(test_case_data)
-                st.dataframe(df, use_container_width=True, hide_index=True)
-    
-    # Starter code
-    starter_code = problem_data.get('starter_code', '')
-    if starter_code:
-        st.markdown("#### Starter Code")
-        st.code(starter_code, language='python')
+            st.markdown("**Example Test Cases**")
+            rows = [
+                {
+                    "Case":            f"#{i + 1}",
+                    "Input":           str(tc.get("input")),
+                    "Expected Output": str(tc.get("expected_output")),
+                }
+                for i, tc in enumerate(test_cases)
+            ]
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-def render_results(results: list, review_data: dict) -> None:
-    """
-    Render test results and AI review.
-    
-    Args:
-        results: List of test result dictionaries
-        review_data: Dictionary with AI review information
-    """
-    st.markdown("## 📊 Test Results")
-    
+    starter = problem_data.get("starter_code", "")
+    if starter:
+        st.markdown("**Starter Code**")
+        st.code(starter, language="python")
+
+
+# ---------------------------------------------------------------------------
+# Results panel
+# ---------------------------------------------------------------------------
+
+def render_results(results: list[dict], review_data: dict) -> None:
+    """Render test-case results table and AI code review."""
+    # --- Test results ---
+    st.markdown("### 📊 Test Results")
     if results:
-        # Convert results to DataFrame for display
         df = pd.DataFrame(results)
-        
-        # Style the Status column
-        def color_status(val):
-            if "✅" in str(val):
-                return 'color: green;'
-            elif "❌" in str(val):
-                return 'color: red;'
-            return ''
-        
-        # Display styled DataFrame
-        st.dataframe(
-            df.style.applymap(color_status, subset=['Status']),
-            use_container_width=True,
-            hide_index=True
-        )
-        
-        # Calculate pass rate
-        total_tests = len(results)
-        passed_tests = sum(1 for r in results if "✅" in str(r.get('Status', '')))
-        pass_rate = (passed_tests / total_tests * 100) if total_tests > 0 else 0
-        
-        st.markdown(f"**Pass Rate:** {passed_tests}/{total_tests} ({pass_rate:.1f}%)")
-    else:
-        st.info("No test results available yet.")
-    
-    # AI Review section
-    st.markdown("## 🤖 AI Code Review")
-    
-    if review_data:
-        # Roast review
-        roast = review_data.get('roast_review', 'No review available.')
-        st.info(f"**Code Roast:** {roast}")
-        
-        # Complexity analysis
-        col1, col2 = st.columns(2)
-        with col1:
-            time_complexity = review_data.get('time_complexity', 'N/A')
-            st.metric(label="⏱️ Time Complexity", value=time_complexity)
-        
-        with col2:
-            space_complexity = review_data.get('space_complexity', 'N/A')
-            st.metric(label="💾 Space Complexity", value=space_complexity)
-        
-        # AI bonus score
-        ai_bonus = review_data.get('ai_bonus_score', 0)
-        st.progress(ai_bonus / 10, text=f"AI Bonus Score: {ai_bonus}/10")
-    else:
-        st.info("AI review not available yet.")
 
-def render_match_info(match_id: str, player_name: str) -> None:
+        def _status_style(val: str) -> str:
+            if "✅" in val:
+                return "color: #22c55e; font-weight: bold"
+            if "❌" in val:
+                return "color: #ef4444; font-weight: bold"
+            return ""
+
+        st.dataframe(
+            df.style.map(_status_style, subset=["Status"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        passed = sum(1 for r in results if "✅" in str(r.get("Status", "")))
+        total  = len(results)
+        pct    = passed / total * 100 if total else 0
+        st.caption(f"Passed {passed}/{total} &nbsp;·&nbsp; {pct:.0f}%")
+    else:
+        st.info("No test results yet.")
+
+    # --- AI review ---
+    st.markdown("### 🤖 AI Code Review")
+    if not review_data:
+        st.info("AI review not available.")
+        return
+
+    st.info(f"💬 {review_data.get('roast_review', 'No review.')}")
+
+    col_tc, col_sc, col_bonus = st.columns(3)
+    col_tc.metric("⏱️ Time Complexity",  review_data.get("time_complexity",  "N/A"))
+    col_sc.metric("💾 Space Complexity", review_data.get("space_complexity", "N/A"))
+
+    bonus = review_data.get("ai_bonus_score", 0)
+    col_bonus.metric("⭐ AI Bonus", f"{bonus} / 10")
+    st.progress(bonus / 10)
+
+
+# ---------------------------------------------------------------------------
+# Sidebar match info
+# ---------------------------------------------------------------------------
+
+def render_match_info(match_id: str, player_name: str, share_url: str) -> None:
     """
-    Render match information panel.
-    
+    Render the sidebar panel with match metadata and share link.
+
     Args:
-        match_id: Firestore match ID
-        player_name: Current player's display name
+        match_id:    Firestore document ID.
+        player_name: Human-readable name for the current player.
+        share_url:   Full URL the opponent should open.
     """
     with st.sidebar:
         st.markdown("## 📍 Match Info")
-        
-        # Match ID
-        st.markdown(f"**Match ID:** {match_id}")
-        
-        # Player info
         st.markdown(f"**You are:** {player_name}")
-        
-        # Copyable share link
-        st.markdown("### 📤 Share Match")
-        share_text = f"Join my 1v1 Code Clash! Match ID: {match_id}"
-        st.code(share_text, language='text')
-        
-        # QR code for mobile sharing (optional)
+        st.markdown(f"**Match ID:** {match_id}")
+
+        st.markdown("---")
+        st.markdown("### 🔗 Invite Your Opponent")
+        st.code(share_url, language="text")
+        st.caption("Copy the URL above and send it to your opponent.")
+
         st.markdown("---")
         st.markdown("### ⚙️ Settings")
-        
-        # Auto-refresh toggle
-        auto_refresh = st.toggle("Auto-refresh", value=True, key="auto_refresh_toggle")
-        if auto_refresh:
-            st.caption("Page will auto-refresh every 3 seconds")
-        else:
-            st.caption("Auto-refresh disabled")
+        auto = st.toggle("Auto-refresh (every 3 s)", value=True, key="auto_refresh_toggle")
+        st.session_state["auto_refresh"] = auto
 
-def render_winner_screen(winner: str, p1_score: int, p2_score: int) -> None:
+
+# ---------------------------------------------------------------------------
+# Winner / finish screen
+# ---------------------------------------------------------------------------
+
+def render_winner_screen(
+    winner: str,
+    p1_score: int,
+    p2_score: int,
+    show_balloons: bool = False,
+) -> None:
     """
-    Render the winner announcement screen.
-    
+    Announce the match result.
+
     Args:
-        winner: "p1", "p2", or "draw"
-        p1_score: Player 1 final score
-        p2_score: Player 2 final score
+        winner:        `"p1"`, `"p2"`, or `"draw"`.
+        p1_score:      Final score for Player 1.
+        p2_score:      Final score for Player 2.
+        show_balloons: Pass `True` only on the first render (use the
+                       `state_manager.should_show_balloons()` guard).
     """
     st.markdown("# 🏆 Match Complete!")
-    
-    # Determine winner display
-    if winner == "p1":
-        st.success("🎉 **Player 1 Wins!**")
-        st.balloons()
-    elif winner == "p2":
-        st.success("🎉 **Player 2 Wins!**")
-        st.balloons()
-    else:
-        st.info("🤝 **It's a Draw!**")
-    
-    # Final scores
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric(label="Player 1 Score", value=p1_score)
-    
-    with col2:
-        st.markdown(" ")  # Spacing
-        st.markdown(" ")  # Spacing
-        st.metric(label="Player 2 Score", value=p2_score)
-    
-    # Play again button
-    st.markdown("---")
-    if st.button("🔄 Play Again", type="primary", use_container_width=True):
-        st.session_state.clear()
-        st.experimental_rerun()
 
-if __name__ == "__main__":
-    # Test the module
-    print("Layout Components Module - Testing interface")
-    print("render_header(p1_score, p2_score, match_status): Renders header with metrics")
-    print("render_problem_panel(problem_data): Displays problem details")
-    print("render_results(results, review_data): Shows test results and AI review")
-    print("render_match_info(match_id, player_name): Shows match info in sidebar")
-    print("render_winner_screen(winner, p1_score, p2_score): Announces match winner")
+    _WINNER_MESSAGES = {
+        "p1":   ("🎉 Player 1 Wins!", "success"),
+        "p2":   ("🎉 Player 2 Wins!", "success"),
+        "draw": ("🤝 It's a Draw!",   "info"),
+    }
+    message, kind = _WINNER_MESSAGES.get(winner, ("Match finished.", "info"))
+
+    if show_balloons:
+        st.balloons()
+
+    getattr(st, kind)(f"**{message}**")
+
+    col1, col2 = st.columns(2)
+    col1.metric("Player 1 Score", p1_score)
+    col2.metric("Player 2 Score", p2_score)
