@@ -54,6 +54,55 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+
+# ---------------------------------------------------------------------------
+# Firestore sanitiser
+# ---------------------------------------------------------------------------
+
+def _to_firestore_safe(value):
+    """
+    Recursively convert a value to a Firestore-safe type.
+
+    Firestore supports: str, int, float, bool, None, list, dict.
+    It rejects: tuples, sets, custom objects, bytes with wrong encoding.
+
+    Gemini sometimes returns:
+      - None as expected_output
+      - Tuples inside input lists
+      - Integers where strings are expected (or vice-versa)
+
+    We normalise everything so Firestore never sees an unsupported type.
+    """
+    if value is None:
+        return ""          # Firestore allows None but it causes issues downstream
+    if isinstance(value, bool):
+        return value       # bool before int — bool is subclass of int
+    if isinstance(value, (int, float, str)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_to_firestore_safe(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _to_firestore_safe(v) for k, v in value.items()}
+    # Anything else (e.g. a custom object) — convert to string
+    return str(value)
+
+
+def _sanitise_problem_data(problem_data: dict) -> dict:
+    """
+    Return a deep-cleaned copy of problem_data safe for Firestore storage.
+    Ensures all test case inputs and expected_outputs are serialisable.
+    """
+    safe = _to_firestore_safe(problem_data)
+
+    # Extra pass: make sure every test case has the right shape
+    for tc in safe.get("test_cases", []):
+        if not isinstance(tc.get("input"), list):
+            tc["input"] = [tc["input"]] if tc.get("input") is not None else []
+        if "expected_output" not in tc:
+            tc["expected_output"] = ""
+
+    return safe
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -99,7 +148,7 @@ def create_match(problem_data: dict) -> str:
     doc: dict = {
         "created_at": _utc_now(),
         "status": MatchStatus.WAITING,
-        "problem_data": problem_data,
+        "problem_data": _sanitise_problem_data(problem_data),
         "players": {
             "p1": {"code": "", "score": 0, "status": PlayerStatus.JOINED},
             "p2": {"code": "", "score": 0, "status": PlayerStatus.WAITING},
