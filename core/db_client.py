@@ -1,267 +1,228 @@
-﻿import streamlit as st
+"""
+core/db_client.py — Firebase Firestore integration.
+
+Public API
+----------
+initialize_firebase()                   one-time SDK setup (idempotent)
+create_match(problem_data) -> str       create a new match, return match_id
+get_match_state(match_id) -> dict|None  read a match document
+update_player_state(match_id, player, updates)
+update_match_status(match_id, status)
+join_match_as_p2(match_id) -> bool
+resolve_player_id(match_id) -> str      determine which slot a new visitor gets
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from datetime import datetime, timezone
+from typing import Optional
+
+import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, firestore
-from datetime import datetime
-import uuid
-import json
 
-# Global db instance
-db = None
+from utils.config import (
+    MATCHES_COLLECTION,
+    MATCH_ID_PREFIX,
+    MATCH_ID_HEX_CHARS,
+    MatchStatus,
+    PlayerStatus,
+    VALID_PLAYERS,
+    VALID_MATCH_STATUSES,
+)
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _is_initialized() -> bool:
+    return bool(firebase_admin._apps)
+
+
+def _get_db() -> firestore.Client:
+    """Return the Firestore client, initializing the SDK if needed."""
+    if not _is_initialized():
+        initialize_firebase()
+    return firestore.client()
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def initialize_firebase() -> None:
-    """Initialize Firebase Admin SDK with credentials from Streamlit secrets."""
-    global db
-    try:
-        if firebase_admin._apps:
-            # Already initialized
-            print("Firebase already initialized")
-            db = firestore.client()
-            return
-        
-        # Get credentials from secrets
-        firebase_secrets = st.secrets.get("firebase_credentials")
-        if not firebase_secrets:
-            raise ValueError("firebase_credentials not found in Streamlit secrets")
-        
-        # Convert TOML dict to JSON string for credentials
-        cred_dict = dict(firebase_secrets)
-        
-        # Create credentials object
-        cred = credentials.Certificate(cred_dict)
-        
-        # Initialize Firebase
-        firebase_admin.initialize_app(cred)
-        db = firestore.client()
-        print("Firebase Firestore initialized successfully")
-        
-    except Exception as e:
-        print(f"Failed to initialize Firebase: {e}")
-        raise
+    """
+    Initialize Firebase Admin SDK using credentials from Streamlit secrets.
+    Idempotent — safe to call on every rerun.
+    """
+    if _is_initialized():
+        return
 
-def _get_db():
-    """Get Firestore database instance, initializing if needed."""
-    global db
-    if db is None:
-        initialize_firebase()
-    return db
+    raw: dict | None = st.secrets.get("firebase_credentials")
+    if not raw:
+        raise EnvironmentError(
+            "firebase_credentials not found in Streamlit secrets. "
+            "Copy .streamlit/secrets.toml.example and fill in your Firebase credentials."
+        )
+
+    cred = credentials.Certificate(dict(raw))
+    firebase_admin.initialize_app(cred)
+    logger.info("Firebase Admin SDK initialised.")
+
 
 def generate_match_id() -> str:
-    """Generate a unique match ID in format: clash_xxxxxx."""
-    random_chars = uuid.uuid4().hex[:6]
-    return f"clash_{random_chars}"
+    """Return a unique match ID like `clash_a3f9c1`."""
+    return f"{MATCH_ID_PREFIX}{uuid.uuid4().hex[:MATCH_ID_HEX_CHARS]}"
+
 
 def create_match(problem_data: dict) -> str:
     """
     Create a new match document in Firestore.
-    
+
     Args:
-        problem_data: Dictionary with problem data from generate_problem()
-    
+        problem_data: Validated problem dict from `ai_engine.generate_problem`.
+
     Returns:
-        match_id: Unique ID for the created match
+        The newly created match_id string.
     """
-    db = _get_db()
-    
+    db       = _get_db()
     match_id = generate_match_id()
-    created_at = datetime.utcnow().isoformat() + "Z"
-    
-    match_data = {
-        "created_at": created_at,
-        "status": "waiting",
+
+    doc: dict = {
+        "created_at": _utc_now(),
+        "status": MatchStatus.WAITING,
         "problem_data": problem_data,
         "players": {
-            "p1": {
-                "code": "",
-                "score": 0,
-                "status": "joined"
-            },
-            "p2": {
-                "code": "",
-                "score": 0,
-                "status": "waiting"
-            }
-        }
+            "p1": {"code": "", "score": 0, "status": PlayerStatus.JOINED},
+            "p2": {"code": "", "score": 0, "status": PlayerStatus.WAITING},
+        },
     }
-    
-    try:
-        doc_ref = db.collection("matches").document(match_id)
-        doc_ref.set(match_data)
-        print(f"Match created: {match_id}")
-        return match_id
-    except Exception as e:
-        print(f"Failed to create match: {e}")
-        raise
 
-def get_match_state(match_id: str) -> dict | None:
+    db.collection(MATCHES_COLLECTION).document(match_id).set(doc)
+    logger.info("Match created: %s", match_id)
+    return match_id
+
+
+def get_match_state(match_id: str) -> Optional[dict]:
     """
-    Get current state of a match.
-    
-    Args:
-        match_id: Unique match ID
-    
+    Fetch the current state of a match.
+
     Returns:
-        Dictionary with match data or None if not found
+        Match dict (with `id` key injected) or `None` if not found.
     """
-    db = _get_db()
-    
-    try:
-        doc_ref = db.collection("matches").document(match_id)
-        doc = doc_ref.get()
-        
-        if doc.exists:
-            match_data = doc.to_dict()
-            match_data["id"] = match_id  # Add ID to returned data
-            return match_data
-        else:
-            print(f"Match not found: {match_id}")
-            return None
-    except Exception as e:
-        print(f"Failed to get match state: {e}")
-        raise
+    db  = _get_db()
+    doc = db.collection(MATCHES_COLLECTION).document(match_id).get()
+
+    if not doc.exists:
+        logger.warning("Match not found: %s", match_id)
+        return None
+
+    data       = doc.to_dict()
+    data["id"] = match_id
+    return data
+
 
 def update_player_state(match_id: str, player: str, updates: dict) -> None:
     """
-    Update player-specific fields in a match.
-    
+    Atomically update player-specific fields.
+
     Args:
-        match_id: Unique match ID
-        player: Player identifier ("p1" or "p2")
-        updates: Dictionary with fields to update
+        match_id: Firestore document ID.
+        player:   `"p1"` or `"p2"`.
+        updates:  Field-value pairs, e.g. `{"score": 80, "status": "submitted"}`.
     """
-    db = _get_db()
-    
-    if player not in ["p1", "p2"]:
-        raise ValueError(f"Invalid player: {player}. Must be 'p1' or 'p2'")
-    
-    try:
-        doc_ref = db.collection("matches").document(match_id)
-        
-        # Build update dictionary with nested field paths
-        update_dict = {}
-        for key, value in updates.items():
-            field_path = f"players.{player}.{key}"
-            update_dict[field_path] = value
-        
-        doc_ref.update(update_dict)
-        print(f"Updated {player} state in match {match_id}: {updates}")
-        
-    except Exception as e:
-        print(f"Failed to update player state: {e}")
-        raise
+    if player not in VALID_PLAYERS:
+        raise ValueError(f"player must be one of {VALID_PLAYERS}, got {player!r}")
+
+    db         = _get_db()
+    flat_patch = {f"players.{player}.{k}": v for k, v in updates.items()}
+    db.collection(MATCHES_COLLECTION).document(match_id).update(flat_patch)
+    logger.info("Updated %s in match %s: %s", player, match_id, updates)
+
 
 def update_match_status(match_id: str, status: str) -> None:
     """
-    Update match-level status field.
-    
+    Update the top-level `status` field of a match.
+
     Args:
-        match_id: Unique match ID
-        status: New status ("waiting", "active", "finished")
+        status: One of `MatchStatus.WAITING / ACTIVE / FINISHED`.
     """
-    if status not in ["waiting", "active", "finished"]:
-        raise ValueError(f"Invalid status: {status}. Must be 'waiting', 'active', or 'finished'")
-    
+    if status not in VALID_MATCH_STATUSES:
+        raise ValueError(f"status must be one of {VALID_MATCH_STATUSES}, got {status!r}")
+
     db = _get_db()
-    
-    try:
-        doc_ref = db.collection("matches").document(match_id)
-        doc_ref.update({"status": status})
-        print(f"Updated match {match_id} status to: {status}")
-        
-    except Exception as e:
-        print(f"Failed to update match status: {e}")
-        raise
+    db.collection(MATCHES_COLLECTION).document(match_id).update({"status": status})
+    logger.info("Match %s status -> %s", match_id, status)
+
 
 def join_match_as_p2(match_id: str) -> bool:
     """
-    Join an existing match as player 2.
-    
-    Args:
-        match_id: Unique match ID
-    
-    Returns:
-        True if joined successfully, False if match is full or not found
-    """
-    db = _get_db()
-    
-    try:
-        doc_ref = db.collection("matches").document(match_id)
-        doc = doc_ref.get()
-        
-        if not doc.exists:
-            return False
-        
-        match_data = doc.to_dict()
-        
-        # Check if p2 is still waiting
-        if match_data.get("players", {}).get("p2", {}).get("status") == "waiting":
-            # Update p2 status to joined
-            update_dict = {
-                f"players.p2.status": "joined"
-            }
-            doc_ref.update(update_dict)
-            
-            # Update match status to active
-            update_match_status(match_id, "active")
-            print(f"Player 2 joined match: {match_id}")
-            return True
-        else:
-            print(f"Match {match_id} is full or p2 already joined")
-            return False
-            
-    except Exception as e:
-        print(f"Failed to join match as p2: {e}")
-        return False
+    Atomically claim the p2 slot and activate the match.
 
-def get_player_in_match(match_id: str) -> str:
-    """
-    Determine which player slot is available/assigned for current session.
-    
-    Args:
-        match_id: Unique match ID
-    
     Returns:
-        "p1", "p2", or raises error
+        `True` if p2 slot was claimed, `False` if already taken or match missing.
     """
-    try:
-        match_data = get_match_state(match_id)
-        if not match_data:
-            raise ValueError(f"Match not found: {match_id}")
-        
-        # Check session state first
-        player_id = st.session_state.get("player_id")
-        if player_id in ["p1", "p2"]:
-            return player_id
-        
-        # Determine available player
-        p1_status = match_data.get("players", {}).get("p1", {}).get("status")
-        p2_status = match_data.get("players", {}).get("p2", {}).get("status")
-        
-        # If p2 is waiting, assign current user as p2
-        if p2_status == "waiting":
-            st.session_state["player_id"] = "p2"
-            join_match_as_p2(match_id)
+    db      = _get_db()
+    doc_ref = db.collection(MATCHES_COLLECTION).document(match_id)
+
+    @firestore.transactional
+    def _txn(transaction: firestore.Transaction) -> bool:
+        snapshot = doc_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return False
+
+        p2_status = snapshot.get("players.p2.status")
+        if p2_status != PlayerStatus.WAITING:
+            logger.info("Match %s: p2 slot already taken.", match_id)
+            return False
+
+        transaction.update(doc_ref, {
+            "players.p2.status": PlayerStatus.JOINED,
+            "status": MatchStatus.ACTIVE,
+        })
+        return True
+
+    txn    = db.transaction()
+    result = _txn(txn)
+    if result:
+        logger.info("Player 2 joined match %s.", match_id)
+    return result
+
+
+def resolve_player_id(match_id: str, session_player_id: Optional[str]) -> str:
+    """
+    Determine which player slot the current visitor occupies.
+
+    This is a *pure data-layer* function — it does NOT write to session_state.
+    The caller (app.py) is responsible for persisting the returned value.
+
+    Logic:
+    - If the caller already has a valid player_id (e.g. from session state), honour it.
+    - If p2 slot is still `waiting`, claim it and return `"p2"`.
+    - Otherwise, default to `"p1"` (e.g. creator refreshed the page).
+
+    Returns:
+        `"p1"` or `"p2"`.
+    """
+    if session_player_id in VALID_PLAYERS:
+        return session_player_id
+
+    match_data = get_match_state(match_id)
+    if not match_data:
+        raise ValueError(f"Match not found: {match_id}")
+
+    p2_status = match_data.get("players", {}).get("p2", {}).get("status")
+    if p2_status == PlayerStatus.WAITING:
+        success = join_match_as_p2(match_id)
+        if success:
             return "p2"
-        elif p1_status == "joined" and p2_status == "joined":
-            # Both players already joined, check if we have a session state
-            if not player_id:
-                raise ValueError("Match is full (both players already joined)")
-            return player_id
-        else:
-            # Should not happen
-            raise ValueError("Unexpected match state")
-            
-    except Exception as e:
-        print(f"Failed to get player in match: {e}")
-        raise
 
-if __name__ == "__main__":
-    # Test the module
-    print("Firebase Database Client Module - Testing interface")
-    print("initialize_firebase(): OK (requires secrets)")
-    print("generate_match_id(): Returns clash_xxxxxx format")
-    print("create_match(problem_data): Creates Firestore document, returns match_id")
-    print("get_match_state(match_id): Returns match dict or None")
-    print("update_player_state(match_id, player, updates): Updates player fields")
-    print("update_match_status(match_id, status): Updates match status")
-    print("join_match_as_p2(match_id): Joins match as player 2")
-    print("get_player_in_match(match_id): Determines player role")
+    return "p1"
