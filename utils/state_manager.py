@@ -1,169 +1,208 @@
-﻿import streamlit as st
+"""
+utils/state_manager.py — Streamlit session-state helpers.
+
+Centralises all reads and writes to st.session_state so the rest of the
+codebase never has to know the exact key names.
+"""
+
+from __future__ import annotations
+
+import time
+import urllib.parse
+import logging
+
+import streamlit as st
+
+from utils.config import POLL_INTERVAL_SECS, DEFAULT_DIFFICULTY
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Key registry — one place to rename a key if needed
+# ---------------------------------------------------------------------------
+_K_PLAYER_ID      = "player_id"
+_K_MATCH_ID       = "match_id"
+_K_DIFFICULTY     = "difficulty"
+_K_SUBMITTED      = "submitted"
+_K_SUBMITTED_CODE = "submitted_code"
+_K_CURRENT_CODE   = "current_code"
+_K_LAST_RESULTS   = "last_results"
+_K_LAST_SCORE     = "last_score"
+_K_LAST_REVIEW    = "last_ai_review"
+_K_AUTO_REFRESH   = "auto_refresh"
+_K_LAST_POLL      = "last_poll_time"
+_K_POLL_INTERVAL  = "poll_interval"
+_K_BALLOONS_SHOWN = "balloons_shown"
+
+
+# ---------------------------------------------------------------------------
+# Initialisation
+# ---------------------------------------------------------------------------
 
 def init_session_state() -> None:
     """
-    Initialize Streamlit session state with default values.
-    
-    This should be called at the beginning of app.py to ensure
-    all session variables are properly initialized.
+    Set default values for all session-state keys.
+    Safe to call on every Streamlit rerun — setdefault is a no-op if the
+    key already exists.
     """
-    # Player and match identification
-    st.session_state.setdefault("player_id", None)  # "p1" or "p2"
-    st.session_state.setdefault("match_id", None)   # Firestore match ID
-    
-    # Match creation state
-    st.session_state.setdefault("difficulty", "medium")  # Selected difficulty
-    
-    # Player action state
-    st.session_state.setdefault("submitted", False)  # Whether player has submitted
-    st.session_state.setdefault("submitted_code", "")  # Last submitted code
-    st.session_state.setdefault("current_code", "")  # Current editor content
-    
-    # Results and scoring
-    st.session_state.setdefault("last_results", [])  # Last test results
-    st.session_state.setdefault("last_score", 0)  # Last calculated score
-    st.session_state.setdefault("last_ai_review", {})  # Last AI review data
-    
-    # UI state
-    st.session_state.setdefault("auto_refresh", True)  # Enable auto-refresh
-    st.session_state.setdefault("view_mode", "problem")  # "problem" or "results"
-    
-    # Match polling
-    st.session_state.setdefault("last_poll_time", 0)  # Timestamp of last poll
-    st.session_state.setdefault("poll_interval", 3)  # Seconds between polls
+    defaults = {
+        _K_PLAYER_ID:      None,
+        _K_MATCH_ID:       None,
+        _K_DIFFICULTY:     DEFAULT_DIFFICULTY,
+        _K_SUBMITTED:      False,
+        _K_SUBMITTED_CODE: "",
+        _K_CURRENT_CODE:   "",
+        _K_LAST_RESULTS:   [],
+        _K_LAST_SCORE:     0,
+        _K_LAST_REVIEW:    {},
+        _K_AUTO_REFRESH:   True,
+        _K_LAST_POLL:      0.0,
+        _K_POLL_INTERVAL:  POLL_INTERVAL_SECS,
+        _K_BALLOONS_SHOWN: False,
+    }
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
+
+
+# ---------------------------------------------------------------------------
+# Player / match identity
+# ---------------------------------------------------------------------------
 
 def update_player_state(player_id: str, match_id: str) -> None:
-    """
-    Update session state with current player and match info.
-    
-    Args:
-        player_id: "p1" or "p2"
-        match_id: Firestore match ID
-    """
-    st.session_state["player_id"] = player_id
-    st.session_state["match_id"] = match_id
+    """Persist which player role and match this session belongs to."""
+    st.session_state[_K_PLAYER_ID] = player_id
+    st.session_state[_K_MATCH_ID]  = match_id
 
-def clear_match_state() -> None:
-    """
-    Clear match-specific state to allow starting a new match.
-    """
-    # Clear match-related state but keep preferences
-    st.session_state["player_id"] = None
-    st.session_state["match_id"] = None
-    st.session_state["submitted"] = False
-    st.session_state["submitted_code"] = ""
-    st.session_state["current_code"] = ""
-    st.session_state["last_results"] = []
-    st.session_state["last_score"] = 0
-    st.session_state["last_ai_review"] = {}
 
-def update_submission_state(code: str, results: list, score: int, ai_review: dict) -> None:
-    """
-    Update state after code submission.
-    
-    Args:
-        code: Submitted code
-        results: Test case results
-        score: Calculated score
-        ai_review: AI review data
-    """
-    st.session_state["submitted"] = True
-    st.session_state["submitted_code"] = code
-    st.session_state["current_code"] = code
-    st.session_state["last_results"] = results
-    st.session_state["last_score"] = score
-    st.session_state["last_ai_review"] = ai_review
+def get_player_id() -> str | None:
+    return st.session_state.get(_K_PLAYER_ID)
 
-def reset_submission_state() -> None:
-    """
-    Reset submission state for a new attempt.
-    """
-    st.session_state["submitted"] = False
-    st.session_state["last_results"] = []
-    st.session_state["last_score"] = 0
-    st.session_state["last_ai_review"] = {}
+
+def get_match_id() -> str | None:
+    return st.session_state.get(_K_MATCH_ID)
+
 
 def get_player_display_name() -> str:
-    """
-    Get display name for current player.
-    
-    Returns:
-        "Player 1", "Player 2", or "Unknown"
-    """
-    player_id = st.session_state.get("player_id")
-    if player_id == "p1":
-        return "Player 1"
-    elif player_id == "p2":
-        return "Player 2"
-    else:
-        return "Unknown"
+    pid = get_player_id()
+    return {"p1": "Player 1", "p2": "Player 2"}.get(pid, "Unknown")
+
 
 def get_opponent_display_name() -> str:
-    """
-    Get display name for opponent.
-    
-    Returns:
-        "Player 1", "Player 2", or "Unknown"
-    """
-    player_id = st.session_state.get("player_id")
-    if player_id == "p1":
-        return "Player 2"
-    elif player_id == "p2":
-        return "Player 1"
-    else:
-        return "Unknown"
+    pid = get_player_id()
+    return {"p1": "Player 2", "p2": "Player 1"}.get(pid, "Unknown")
+
+
+# ---------------------------------------------------------------------------
+# Submission
+# ---------------------------------------------------------------------------
+
+def update_submission_state(
+    code: str,
+    results: list,
+    score: int,
+    ai_review: dict,
+) -> None:
+    """Persist everything that results from a successful code submission."""
+    st.session_state[_K_SUBMITTED]      = True
+    st.session_state[_K_SUBMITTED_CODE] = code
+    st.session_state[_K_CURRENT_CODE]   = code
+    st.session_state[_K_LAST_RESULTS]   = results
+    st.session_state[_K_LAST_SCORE]     = score
+    st.session_state[_K_LAST_REVIEW]    = ai_review
+
+
+def is_submitted() -> bool:
+    return bool(st.session_state.get(_K_SUBMITTED, False))
+
+
+def get_last_results() -> list:
+    return st.session_state.get(_K_LAST_RESULTS, [])
+
+
+def get_last_score() -> int:
+    return st.session_state.get(_K_LAST_SCORE, 0)
+
+
+def get_last_review() -> dict:
+    return st.session_state.get(_K_LAST_REVIEW, {})
+
+
+def get_submitted_code() -> str:
+    return st.session_state.get(_K_SUBMITTED_CODE, "")
+
+
+def get_current_code(fallback: str = "") -> str:
+    return st.session_state.get(_K_CURRENT_CODE) or fallback
+
+
+# ---------------------------------------------------------------------------
+# Match lifecycle
+# ---------------------------------------------------------------------------
+
+def clear_match_state() -> None:
+    """Reset all match-specific keys while preserving user preferences."""
+    st.session_state[_K_PLAYER_ID]      = None
+    st.session_state[_K_MATCH_ID]       = None
+    st.session_state[_K_SUBMITTED]      = False
+    st.session_state[_K_SUBMITTED_CODE] = ""
+    st.session_state[_K_CURRENT_CODE]   = ""
+    st.session_state[_K_LAST_RESULTS]   = []
+    st.session_state[_K_LAST_SCORE]     = 0
+    st.session_state[_K_LAST_REVIEW]    = {}
+    st.session_state[_K_BALLOONS_SHOWN] = False
+
+
+# ---------------------------------------------------------------------------
+# Auto-refresh / polling
+# ---------------------------------------------------------------------------
 
 def should_refresh() -> bool:
     """
-    Check if it's time to refresh based on polling interval.
-    
-    Returns:
-        True if should refresh, False otherwise
+    Return True (and update the timestamp) if enough time has elapsed since
+    the last poll.  Respects the auto_refresh toggle in session state.
     """
-    import time
-    
-    if not st.session_state.get("auto_refresh", True):
+    if not st.session_state.get(_K_AUTO_REFRESH, True):
         return False
-    
-    current_time = time.time()
-    last_poll = st.session_state.get("last_poll_time", 0)
-    interval = st.session_state.get("poll_interval", 3)
-    
-    if current_time - last_poll > interval:
-        st.session_state["last_poll_time"] = current_time
+
+    now      = time.monotonic()
+    last     = st.session_state.get(_K_LAST_POLL, 0.0)
+    interval = st.session_state.get(_K_POLL_INTERVAL, POLL_INTERVAL_SECS)
+
+    if now - last >= interval:
+        st.session_state[_K_LAST_POLL] = now
         return True
-    
+
     return False
+
+
+# ---------------------------------------------------------------------------
+# Winner balloon guard
+# ---------------------------------------------------------------------------
+
+def should_show_balloons() -> bool:
+    """Return True the *first* time the finished screen is rendered."""
+    if not st.session_state.get(_K_BALLOONS_SHOWN, False):
+        st.session_state[_K_BALLOONS_SHOWN] = True
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# URL helpers
+# ---------------------------------------------------------------------------
 
 def get_shareable_url(match_id: str) -> str:
     """
-    Generate a shareable URL for a match.
-    
-    Args:
-        match_id: Firestore match ID
-    
-    Returns:
-        Shareable URL with match_id parameter
-    """
-    import urllib.parse
-    
-    # For Streamlit Cloud deployment, use relative URL
-    # In production, this would be the deployed app URL
-    base_url = st.experimental_get_query_params().get("base_url", ["/"])[0]
-    
-    # Create query parameters
-    params = {"match_id": match_id}
-    query_string = urllib.parse.urlencode(params)
-    
-    return f"{base_url}?{query_string}"
+    Build a shareable URL for a match using the current page's host.
 
-if __name__ == "__main__":
-    # Test the module
-    print("State Manager Module - Testing interface")
-    print("init_session_state(): Initializes all session variables")
-    print("update_player_state('p1', 'clash_abc123'): Sets player and match")
-    print("clear_match_state(): Clears match-specific state")
-    print("update_submission_state(...): Updates after submission")
-    print("get_player_display_name(): Returns 'Player 1', 'Player 2', or 'Unknown'")
-    print("should_refresh(): Returns True/False based on polling interval")
-    print("get_shareable_url('clash_abc123'): Returns shareable match URL")
+    Streamlit exposes the browser URL via st.context (>=1.37) or falls back
+    to a relative path that works on Streamlit Community Cloud.
+    """
+    try:
+        # st.context.url is available in Streamlit >= 1.37
+        base = str(st.context.url).split("?")[0]
+    except AttributeError:
+        base = "/"
+
+    params = urllib.parse.urlencode({"match_id": match_id})
+    return f"{base}?{params}"
