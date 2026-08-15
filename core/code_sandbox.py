@@ -24,7 +24,8 @@ from utils.config import (
     MAX_TEST_SCORE,
     AI_BONUS_MIN,
     AI_BONUS_MAX,
-    BLOCKED_PATTERNS,
+    BLOCKED_SUBSTRINGS,
+    BLOCKED_REGEX,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,8 +104,13 @@ def sanitize_code(code: str) -> str:
             f"({len(code):,} > {MAX_CODE_LENGTH:,} characters)."
         )
 
-    for pattern in BLOCKED_PATTERNS:
-        # Use regex so word-boundary patterns (\\b) work correctly
+    for substring in BLOCKED_SUBSTRINGS:
+        if substring in code:
+            raise ValueError(
+                f"Submission contains a disallowed operation: {substring!r}"
+            )
+
+    for pattern in BLOCKED_REGEX:
         if re.search(pattern, code):
             raise ValueError(
                 f"Submission contains a disallowed operation: {pattern!r}"
