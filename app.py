@@ -1,5 +1,5 @@
 """
-app.py — 1v1 Code Clash Arena entry point.
+app.py — Syntax Showdown entry point.
 
 Responsibilities:
   • Page config and one-time SDK initialisation (guarded so it runs once).
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # Page config — must be the FIRST Streamlit call
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="1v1 Code Clash Arena",
+    page_title="Syntax Showdown",
     page_icon="⚔️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -43,7 +43,7 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 
 def _render_lobby() -> None:
-    st.markdown("# ⚔️ 1v1 Code Clash Arena")
+    st.markdown("# ⚔️ Syntax Showdown")
     st.markdown("### Real-time competitive programming, powered by AI")
     st.markdown("""
 **How it works**
