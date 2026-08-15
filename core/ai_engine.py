@@ -1,9 +1,9 @@
 """
-core/ai_engine.py — Google Gemini integration.
+core/ai_engine.py — Google Gemini integration (google-genai SDK).
 
 Public API
 ----------
-initialize_gemini()            one-time SDK setup (idempotent via session state)
+initialize_gemini()            one-time client setup (idempotent, process-level)
 generate_problem(difficulty)   returns a validated problem dict
 review_code(title, user_code)  returns a validated review dict
 """
@@ -16,7 +16,7 @@ import time
 import logging
 
 import streamlit as st
-import google.generativeai as genai
+from google import genai
 
 from utils.config import (
     GEMINI_PROBLEM_MODEL,
@@ -28,10 +28,22 @@ from utils.config import (
     VALID_DIFFICULTIES,
 )
 
+import warnings
+warnings.filterwarnings('ignore', message='.*AFC.*')
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Prompt templates — kept here so they are easy to tune without touching logic
+# Module-level client — set once by initialize_gemini(), reused everywhere.
+# Using a module-level variable (not session_state) because the Client object
+# is a plain Python object with no Streamlit dependency; it is safe to share
+# across reruns and sessions within the same process.
+# ---------------------------------------------------------------------------
+_client: genai.Client | None = None
+
+
+# ---------------------------------------------------------------------------
+# Prompt templates
 # ---------------------------------------------------------------------------
 
 _PROBLEM_PROMPT = """\
@@ -56,7 +68,7 @@ Output exactly as a JSON object using this format:
 
 Generate exactly {num_test_cases} test cases.
 Do not include Markdown formatting.
-Do not include `json.
+Do not include triple backticks or json fences.
 Return only the JSON object.\
 """
 
@@ -86,7 +98,7 @@ Return exactly this JSON format:
 
 The ai_bonus_score must be an integer from 0 to 10 based on efficiency and code quality.
 Do not include Markdown formatting.
-Do not include `json.
+Do not include triple backticks or json fences.
 Return only the JSON object.
 
 Problem title:
@@ -96,7 +108,6 @@ Submitted code:
 {user_code}\
 """
 
-# Required keys for each response schema
 _PROBLEM_REQUIRED_KEYS = {"title", "description", "constraints", "starter_code", "test_cases"}
 _REVIEW_REQUIRED_KEYS  = {"time_complexity", "space_complexity", "roast_review", "ai_bonus_score"}
 
@@ -105,21 +116,23 @@ _REVIEW_REQUIRED_KEYS  = {"time_complexity", "space_complexity", "roast_review",
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _is_initialized() -> bool:
-    """Return True if Gemini has already been configured this session."""
-    return st.session_state.get("_gemini_initialized", False)
+def _get_client() -> genai.Client:
+    """Return the module-level client, raising clearly if not initialised."""
+    if _client is None:
+        raise RuntimeError(
+            "Gemini client not initialised. "
+            "Call initialize_gemini() before generating content."
+        )
+    return _client
 
 
 def _clean_json_response(text: str) -> str:
-    """
-    Strip markdown fences and surrounding prose from a Gemini response,
-    returning the innermost JSON object string.
-    """
-    # Remove `json ... ` or ` ... ` fences
-    text = re.sub(r"`(?:json)?\s*", "", text)
+    """Strip markdown fences and extract the outermost JSON object."""
+    # Remove ```json ... ``` or ``` ... ``` fences
+    text = re.sub(r"```(?:json)?\s*", "", text)
+    text = re.sub(r"```", "", text)
     text = text.strip()
 
-    # Extract the outermost {...} block to drop any trailing commentary
     start = text.find("{")
     end   = text.rfind("}") + 1
     if start != -1 and end > start:
@@ -130,24 +143,31 @@ def _clean_json_response(text: str) -> str:
 
 def _call_with_retry(model_name: str, prompt: str, max_retries: int = 3) -> str:
     """
-    Call Gemini and return response text.
-    Retries up to *max_retries* times with exponential back-off on transient errors.
+    Call the Gemini API and return response text.
+    Retries up to max_retries times with exponential back-off.
     """
-    model = genai.GenerativeModel(model_name)
+    client    = _get_client()
     last_exc: Exception | None = None
 
     for attempt in range(1, max_retries + 1):
         try:
-            response = model.generate_content(prompt)
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
             return response.text
         except Exception as exc:
             last_exc = exc
             wait = 2 ** attempt
-            logger.warning("Gemini call failed (attempt %d/%d): %s — retrying in %ds",
-                           attempt, max_retries, exc, wait)
+            logger.warning(
+                "Gemini call failed (attempt %d/%d): %s — retrying in %ds",
+                attempt, max_retries, exc, wait,
+            )
             time.sleep(wait)
 
-    raise RuntimeError(f"Gemini call failed after {max_retries} attempts") from last_exc
+    raise RuntimeError(
+        f"Gemini call failed after {max_retries} attempts"
+    ) from last_exc
 
 
 def _parse_and_validate(raw_text: str, required_keys: set[str]) -> dict:
@@ -172,10 +192,15 @@ def _parse_and_validate(raw_text: str, required_keys: set[str]) -> dict:
 
 def initialize_gemini() -> None:
     """
-    Configure the Gemini SDK with the API key from Streamlit secrets.
-    Idempotent — safe to call on every rerun; actual work runs only once per session.
+    Create the Gemini Client using the API key from Streamlit secrets.
+
+    Idempotent — if the client already exists this is a no-op.
+    Stores the client at module level (not in session_state) so it is
+    shared across all sessions in the same process without needing
+    st.secrets on every rerun.
     """
-    if _is_initialized():
+    global _client
+    if _client is not None:
         return
 
     api_key: str | None = st.secrets.get("GEMINI_API_KEY")
@@ -185,9 +210,8 @@ def initialize_gemini() -> None:
             "Add it to .streamlit/secrets.toml or the Streamlit Cloud secrets panel."
         )
 
-    genai.configure(api_key=api_key)
-    st.session_state["_gemini_initialized"] = True
-    logger.info("Gemini SDK initialised.")
+    _client = genai.Client(api_key=api_key)
+    logger.info("Gemini Client initialised (google-genai SDK).")
 
 
 def generate_problem(difficulty: str) -> dict:
@@ -198,27 +222,24 @@ def generate_problem(difficulty: str) -> dict:
         difficulty: One of "easy", "medium", "hard".
 
     Returns:
-        Validated problem dict with keys:
-        title, description, constraints, starter_code, test_cases.
-
-    Raises:
-        ValueError: If difficulty is invalid or Gemini returns bad data.
-        RuntimeError: If all retry attempts fail.
+        Validated problem dict: title, description, constraints,
+        starter_code, test_cases.
     """
     if difficulty not in VALID_DIFFICULTIES:
-        raise ValueError(f"difficulty must be one of {VALID_DIFFICULTIES}, got {difficulty!r}")
+        raise ValueError(
+            f"difficulty must be one of {VALID_DIFFICULTIES}, got {difficulty!r}"
+        )
 
-    prompt = _PROBLEM_PROMPT.format(
+    prompt   = _PROBLEM_PROMPT.format(
         difficulty=difficulty,
         num_test_cases=NUM_TEST_CASES,
     )
-
     raw_text = _call_with_retry(GEMINI_PROBLEM_MODEL, prompt)
     problem  = _parse_and_validate(raw_text, _PROBLEM_REQUIRED_KEYS)
 
-    actual_cases = len(problem.get("test_cases", []))
-    if actual_cases != NUM_TEST_CASES:
-        logger.warning("Expected %d test cases, got %d", NUM_TEST_CASES, actual_cases)
+    actual = len(problem.get("test_cases", []))
+    if actual != NUM_TEST_CASES:
+        logger.warning("Expected %d test cases, got %d", NUM_TEST_CASES, actual)
 
     return problem
 
@@ -232,12 +253,8 @@ def review_code(title: str, user_code: str) -> dict:
         user_code: Submitted Python code.
 
     Returns:
-        Validated review dict with keys:
-        time_complexity, space_complexity, roast_review, ai_bonus_score.
-
-    Raises:
-        ValueError: If Gemini returns bad data.
-        RuntimeError: If all retry attempts fail.
+        Validated review dict: time_complexity, space_complexity,
+        roast_review, ai_bonus_score.
     """
     if not title:
         raise ValueError("title must not be empty")
@@ -248,10 +265,11 @@ def review_code(title: str, user_code: str) -> dict:
     raw_text = _call_with_retry(GEMINI_REVIEW_MODEL, prompt)
     review   = _parse_and_validate(raw_text, _REVIEW_REQUIRED_KEYS)
 
-    # Clamp ai_bonus_score to the configured range
     score = review.get("ai_bonus_score")
     if not isinstance(score, int) or not (AI_BONUS_MIN <= score <= AI_BONUS_MAX):
-        logger.warning("ai_bonus_score %r out of range; defaulting to %d", score, AI_BONUS_DEFAULT)
+        logger.warning(
+            "ai_bonus_score %r out of range; defaulting to %d", score, AI_BONUS_DEFAULT
+        )
         review["ai_bonus_score"] = AI_BONUS_DEFAULT
 
     return review
