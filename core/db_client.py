@@ -56,22 +56,36 @@ def _utc_now() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Firestore sanitiser
+# Firestore sanitiser — handles Firestore's "no nested arrays" restriction
 # ---------------------------------------------------------------------------
+
+# Firestore forbids arrays that directly contain other arrays.
+# Gemini frequently generates inputs like [[2,7,11,15], 9] which is
+#   array -> array  (invalid).  We wrap every inner list in a map
+#   so the on-wire shape is  array -> map -> array  (valid).
+#
+# The key is deliberately *not* starting with "__" (Firestore reserves __*__).
+_NESTED_LIST_WRAP_KEY = "_fs_list_wrap"
+_LEGACY_WRAP_KEY = "__firestore_list"  # kept for reading old docs
+
 
 def _to_firestore_safe(value):
     """
     Recursively convert a value to a Firestore-safe type.
 
     Firestore supports: str, int, float, bool, None, list, dict.
-    It rejects: tuples, sets, custom objects, bytes with wrong encoding.
+    It rejects: tuples, sets, custom objects, bytes with wrong encoding,
+    and **nested arrays** (array containing array).
 
     Gemini sometimes returns:
       - None as expected_output
       - Tuples inside input lists
       - Integers where strings are expected (or vice-versa)
+      - Nested lists like [[2,7,11,15], 9] for test-case inputs
 
     We normalise everything so Firestore never sees an unsupported type.
+    Nested lists are wrapped as {"_fs_list_wrap": [...]} so that the
+    stored shape is array -> map -> array (which Firestore allows).
     """
     if value is None:
         return ""          # Firestore allows None but it causes issues downstream
@@ -80,24 +94,66 @@ def _to_firestore_safe(value):
     if isinstance(value, (int, float, str)):
         return value
     if isinstance(value, (list, tuple)):
-        return [_to_firestore_safe(v) for v in value]
+        # Build a Firestore-safe list: no element may be a raw list.
+        safe_list: list = []
+        for item in value:
+            if isinstance(item, (list, tuple)):
+                # Wrap inner list in a map to avoid array-in-array
+                safe_list.append({_NESTED_LIST_WRAP_KEY: _to_firestore_safe(item)})
+            elif isinstance(item, dict):
+                safe_list.append({str(k): _to_firestore_safe(v) for k, v in item.items()})
+            elif item is None:
+                safe_list.append("")
+            elif isinstance(item, bool):
+                safe_list.append(item)
+            elif isinstance(item, (int, float, str)):
+                safe_list.append(item)
+            else:
+                safe_list.append(str(item))
+        return safe_list
     if isinstance(value, dict):
         return {str(k): _to_firestore_safe(v) for k, v in value.items()}
-    # Anything else (e.g. a custom object) — convert to string
+    # Anything else (e.g. a custom object, set, bytes) — convert to string
     return str(value)
+
+
+def _from_firestore_safe(value):
+    """
+    Reverse of _to_firestore_safe for the nested-array wrapping.
+
+    Recursively unwraps {"_fs_list_wrap": [...]} (and legacy
+    {"__firestore_list": [...]}) back into plain lists so the rest of
+    the app (code_sandbox, UI) sees the original Gemini shape.
+    """
+    if isinstance(value, list):
+        return [_from_firestore_safe(v) for v in value]
+    if isinstance(value, dict):
+        # Unwrap single-key wrapper maps (current and legacy keys)
+        if set(value.keys()) == {_NESTED_LIST_WRAP_KEY} and isinstance(value[_NESTED_LIST_WRAP_KEY], list):
+            return [_from_firestore_safe(v) for v in value[_NESTED_LIST_WRAP_KEY]]
+        if set(value.keys()) == {_LEGACY_WRAP_KEY} and isinstance(value[_LEGACY_WRAP_KEY], list):
+            return [_from_firestore_safe(v) for v in value[_LEGACY_WRAP_KEY]]
+        return {k: _from_firestore_safe(v) for k, v in value.items()}
+    return value
 
 
 def _sanitise_problem_data(problem_data: dict) -> dict:
     """
     Return a deep-cleaned copy of problem_data safe for Firestore storage.
-    Ensures all test case inputs and expected_outputs are serialisable.
+    Ensures all test case inputs and expected_outputs are serialisable and
+    contain no nested arrays.
     """
     safe = _to_firestore_safe(problem_data)
 
     # Extra pass: make sure every test case has the right shape
     for tc in safe.get("test_cases", []):
         if not isinstance(tc.get("input"), list):
-            tc["input"] = [tc["input"]] if tc.get("input") is not None else []
+            # _to_firestore_safe converts None -> "", so check for "" as well
+            raw = tc.get("input")
+            if raw is None or raw == "":
+                tc["input"] = []
+            else:
+                tc["input"] = [raw]
         if "expected_output" not in tc:
             tc["expected_output"] = ""
 
@@ -166,6 +222,9 @@ def get_match_state(match_id: str) -> Optional[dict]:
 
     Returns:
         Match dict (with `id` key injected) or `None` if not found.
+        The returned `problem_data` is automatically unwrapped so callers
+        see plain lists (nested arrays restored) regardless of the
+        Firestore-safe wrapping.
     """
     db  = _get_db()
     doc = db.collection(MATCHES_COLLECTION).document(match_id).get()
@@ -174,7 +233,7 @@ def get_match_state(match_id: str) -> Optional[dict]:
         logger.warning("Match not found: %s", match_id)
         return None
 
-    data       = doc.to_dict()
+    data       = _from_firestore_safe(doc.to_dict())
     data["id"] = match_id
     return data
 
