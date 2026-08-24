@@ -5,9 +5,21 @@
 
 *A real-time competitive programming platform where two players race to solve the same AI-generated coding problem.*
 
-*Capstone project — MSOT (Mirai) Internship Program*
+*Capstone project — Mirai School of Technology*
 
-<br>
+<p align="center">
+  <a href="https://syntax-showdown.streamlit.app" target="_blank">
+    <img src="https://static.streamlit.io/badges/streamlit_badge_black_white.svg" alt="Open in Streamlit" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://syntax-showdown.streamlit.app">
+    <img src="https://img.shields.io/badge/LIVE_DEMO-🚀_Try_Now-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white" alt="Live Demo" />
+  </a>
+  <br/>
+  <sub><strong>https://syntax-showdown.streamlit.app</strong> &nbsp;•&nbsp; No login &nbsp;•&nbsp; Create a match in 10 seconds &nbsp;•&nbsp; Share the link with your opponent</sub>
+</p>
 
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)
